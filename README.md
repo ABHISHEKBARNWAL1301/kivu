@@ -83,7 +83,7 @@ python -m kivu
 
 Interactive commands:
 
-| Command | Purpose |
+| Command | Description |
 | --- | --- |
 | `/cwd PATH` | Change Kivu's persistent working directory |
 | `/clear` | Clear the model conversation |
@@ -123,7 +123,7 @@ flowchart TD
     J5 --> K
     J6 --> K
 
-    K --> L["Show tool activity and return its result"]
+    K --> L["Show the tool call and return its result"]
     L --> F
 ```
 
