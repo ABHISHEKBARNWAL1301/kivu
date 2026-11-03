@@ -4,18 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kivu-agent"
-version = "0.1.0"
-description = "A small Gemini-powered terminal agent"
+version = "2.0.0.dev0"
+description = "A bring-your-own-key terminal coding agent"
 readme = "README.md"
-requires-python = ">=3.10"
-dependencies = [
-    "google-genai>=1.56,<3",
-    "rich>=13.9,<15",
-]
+requires-python = ">=3.12"
+dependencies = []
 
 [project.scripts]
 kivu = "kivu.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["kivu*"]
-
