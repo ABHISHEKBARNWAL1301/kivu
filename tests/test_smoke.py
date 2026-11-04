@@ -12,6 +12,7 @@ MODULES = [
     "kivu.agent.loop",
     "kivu.agent.context",
     "kivu.providers.base",
+    "kivu.providers.gemini",
     "kivu.tools.registry",
     "kivu.tools.files",
     "kivu.tools.shell",

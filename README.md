@@ -40,6 +40,23 @@ conda activate kivu
 pip install -e .
 ```
 
+Put your API keys in `keys.json` in the repo root. It's gitignored.
+
+```json
+{
+  "gemini": "your-gemini-key"
+}
+```
+
+Pick a provider and model, then start:
+
+```bash
+kivu setup
+kivu
+```
+
+Your choice is saved to `~/.config/kivu/config.json`. Run `kivu setup` again to switch, or override once with `kivu -m <model>`. Run one prompt and exit with `kivu -p "..."`.
+
 ## Tests
 
 ```bash

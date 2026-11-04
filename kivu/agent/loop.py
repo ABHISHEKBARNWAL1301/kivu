@@ -1,17 +1,34 @@
-"""The agent loop.
+from __future__ import annotations
 
-    while not done:
-        response = provider.complete(context, tools)
-        append response to history
-        if response has tool calls:
-            results = run each call through sandbox -> tool
-            append results to history
-        else:
-            return response
+from collections.abc import Callable
 
-To build:
-- step, time and cost limits
-- loop detection (same tool + same args repeated)
-- cancellation between steps
-- retry with backoff on provider errors (429 / 5xx)
-"""
+from ..messages import Message, ToolCall, ToolResult
+from ..providers.base import Provider
+from ..tools.registry import Registry
+
+
+class StepLimitReached(Exception):
+    pass
+
+
+def run(
+    provider: Provider,
+    registry: Registry,
+    system: str,
+    history: list[Message],
+    max_steps: int = 20,
+    on_tool: Callable[[ToolCall, ToolResult], None] = lambda call, result: None,
+) -> Message:
+    """Run until the model answers without calling a tool. Appends to history in place."""
+    for _ in range(max_steps):
+        reply = provider.complete(system, history, registry.specs()).message
+        history.append(reply)
+        if not reply.tool_calls:
+            return reply
+        results = []
+        for call in reply.tool_calls:
+            result = registry.run(call)
+            on_tool(call, result)
+            results.append(result)
+        history.append(Message("user", results))
+    raise StepLimitReached(f"stopped after {max_steps} steps")
