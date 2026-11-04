@@ -12,9 +12,10 @@ from pathlib import Path
 
 from . import __version__, config, providers
 from .agent import loop
-from .messages import Message, user
+from .messages import Message, Response, user
+from .providers.base import Provider
 from .tools.files import file_tools
-from .tools.registry import Registry
+from .tools.registry import Registry, Tool
 from .ui import UI
 
 SYSTEM = (
@@ -22,6 +23,23 @@ SYSTEM = (
     "Use the tools to look at the user's files instead of guessing. "
     "Answer briefly."
 )
+
+
+class Spinner:
+    """Wraps a provider to show a spinner during each model call.
+
+    Only around the model call, not the whole loop, so it never covers an approval prompt.
+    """
+
+    def __init__(self, inner: Provider, ui: UI) -> None:
+        self.inner = inner
+        self.ui = ui
+        self.name = inner.name
+        self.model = inner.model
+
+    def complete(self, system: str, messages: list[Message], tools: list[Tool]) -> Response:
+        with self.ui.thinking():
+            return self.inner.complete(system, messages, tools)
 
 
 def setup(ui: UI) -> None:
@@ -61,7 +79,7 @@ def main() -> None:
         cfg = config.load(args.provider, args.model)
         assert cfg is not None
     print(f"Using {cfg.provider}/{cfg.model} (max_steps={cfg.max_steps})")
-    provider = providers.create(cfg.provider, cfg.model, cfg.api_key)
+    provider = Spinner(providers.create(cfg.provider, cfg.model, cfg.api_key), ui)
     registry = Registry(file_tools(Path(args.cwd)))
     history: list[Message] = []
 
