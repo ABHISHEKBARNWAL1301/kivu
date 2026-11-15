@@ -14,6 +14,7 @@ from . import __version__, config, providers
 from .agent import loop
 from .messages import Message, Response, user
 from .providers.base import Provider
+from .sandbox.approval import Approver
 from .tools.files import file_tools
 from .tools.registry import Registry, Tool
 from .ui import UI
@@ -65,6 +66,7 @@ def main() -> None:
     parser.add_argument("-C", "--cwd", default=".", help="workspace root")
     parser.add_argument("--provider")
     parser.add_argument("-m", "--model")
+    parser.add_argument("-y", "--yes", action="store_true", help="approve every write and command without asking")
     parser.add_argument("--version", action="version", version=f"kivu {__version__}")
     args = parser.parse_args()
 
@@ -80,7 +82,9 @@ def main() -> None:
         assert cfg is not None
     print(f"Using {cfg.provider}/{cfg.model} (max_steps={cfg.max_steps})")
     provider = Spinner(providers.create(cfg.provider, cfg.model, cfg.api_key), ui)
-    registry = Registry(file_tools(Path(args.cwd)))
+    root = Path(args.cwd)
+    approver = Approver(ui, auto=args.yes)
+    registry = Registry(file_tools(root, approver))
     history: list[Message] = []
 
     def ask(text: str) -> bool:
