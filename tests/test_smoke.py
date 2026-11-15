@@ -16,6 +16,7 @@ MODULES = [
     "kivu.tools.registry",
     "kivu.tools.files",
     "kivu.tools.shell",
+    "kivu.tools.tasks",
     "kivu.sandbox.policy",
     "kivu.sandbox.approval",
 ]

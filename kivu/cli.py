@@ -17,13 +17,19 @@ from .providers.base import Provider
 from .sandbox.approval import Approver
 from .tools.files import file_tools
 from .tools.registry import Registry, Tool
+from .tools.shell import shell_tools
+from .tools.tasks import task_tools
 from .ui import UI
 
-SYSTEM = (
-    "You are kivu, a terminal coding assistant. "
-    "Use the tools to look at the user's files instead of guessing. "
-    "Answer briefly."
-)
+SYSTEM = """You are kivu, a coding assistant working in the user's terminal, inside their project.
+
+- Look before you answer: use glob, grep and read_file instead of guessing.
+- Change files with edit_file; use write_file only for new files or full rewrites.
+- After changing code, run the tests or the code with run_shell and fix what fails.
+- For tasks with several steps, keep a plan with update_plan.
+- If the request is unclear, ask with ask_user instead of guessing.
+- If the user declines an action, don't retry it; ask what they want instead.
+- Answer briefly."""
 
 
 class Spinner:
@@ -84,7 +90,7 @@ def main() -> None:
     provider = Spinner(providers.create(cfg.provider, cfg.model, cfg.api_key), ui)
     root = Path(args.cwd)
     approver = Approver(ui, auto=args.yes)
-    registry = Registry(file_tools(root, approver))
+    registry = Registry(file_tools(root, approver) + shell_tools(root, approver) + task_tools(ui))
     history: list[Message] = []
 
     def ask(text: str) -> bool:
