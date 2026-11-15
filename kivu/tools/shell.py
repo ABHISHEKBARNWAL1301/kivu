@@ -10,6 +10,9 @@ Still to build:
 
 from __future__ import annotations
 
+import asyncio
+import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -39,22 +42,31 @@ def is_safe(command: str) -> bool:
 def shell_tools(root: Path, approver: Approver) -> list[Tool]:
     root = root.resolve()
 
-    def run_shell(command: str, timeout_seconds: int = 120) -> str:
+    async def run_shell(command: str, timeout_seconds: int = 120) -> str:
         if not is_safe(command):
             approver.check(f"shell:{command}", "run shell command", command)
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,  # a command waiting for input would hang the agent
+            start_new_session=True,  # its own process group, so we can stop everything it started
+        )
         try:
-            proc = subprocess.run(
-                command,
-                shell=True,
-                cwd=root,
-                capture_output=True,
-                text=True,
-                timeout=int(timeout_seconds),
-                stdin=subprocess.DEVNULL,  # a command waiting for input would hang the agent
-            )
-        except subprocess.TimeoutExpired:
-            raise TimeoutError(f"command timed out after {timeout_seconds}s")
-        output = (proc.stdout + proc.stderr).strip()
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=int(timeout_seconds))
+        except TimeoutError:
+            raise TimeoutError(f"command timed out after {timeout_seconds}s") from None
+        finally:
+            if proc.returncode is None:  # timed out or cancelled (ctrl-c): don't leave it running
+                # Kill the whole group: killing only the shell leaves its children
+                # holding the output pipe, and wait() would block until they finish.
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+        output = (stdout.decode(errors="replace") + stderr.decode(errors="replace")).strip()
         return f"exit code {proc.returncode}\n{output}" if output else f"exit code {proc.returncode}"
 
     return [

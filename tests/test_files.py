@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -35,7 +36,7 @@ class FileToolsTest(unittest.TestCase):
 
     def run_tool(self, name: str, approver: Approver | None = None, **args):
         reg = Registry(file_tools(self.root, approver or Approver(auto=True)))
-        return reg.run(ToolCall("1", name, args))
+        return asyncio.run(reg.run(ToolCall("1", name, args)))
 
     def test_read_with_line_numbers_and_paging(self) -> None:
         out = self.run_tool("read_file", path="a.txt", offset=2, limit=1).output
@@ -83,13 +84,13 @@ class FileToolsTest(unittest.TestCase):
     def test_always_stops_asking(self) -> None:
         answers = Answers("a")
         reg = Registry(file_tools(self.root, Approver(answers)))
-        reg.run(ToolCall("1", "write_file", {"path": "x.txt", "content": "1"}))
-        reg.run(ToolCall("2", "write_file", {"path": "y.txt", "content": "2"}))
+        asyncio.run(reg.run(ToolCall("1", "write_file", {"path": "x.txt", "content": "1"})))
+        asyncio.run(reg.run(ToolCall("2", "write_file", {"path": "y.txt", "content": "2"})))
         self.assertEqual(answers.asked, ["create x.txt"])
         self.assertTrue((self.root / "y.txt").exists())
 
     def test_unknown_tool_is_an_error_result(self) -> None:
-        result = Registry().run(ToolCall("1", "nope", {}))
+        result = asyncio.run(Registry().run(ToolCall("1", "nope", {})))
         self.assertTrue(result.is_error)
 
 

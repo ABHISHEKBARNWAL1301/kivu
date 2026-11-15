@@ -1,12 +1,17 @@
 """Register tools and describe them to the model.
 
+A tool's function can be sync or async. Async ones are awaited; sync ones run
+directly on the event loop, which is fine for quick local work (files, prompts).
+Anything that waits on the network or a process should be async.
+
 Still to build:
 - validate arguments against the schema before running
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import inspect
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,7 +25,7 @@ class Tool:
     name: str
     description: str
     parameters: dict[str, Any]  # JSON schema for the arguments
-    fn: Callable[..., str]
+    fn: Callable[..., str | Awaitable[str]]
 
 
 class Registry:
@@ -35,12 +40,14 @@ class Registry:
     def specs(self) -> list[Tool]:
         return list(self._tools.values())
 
-    def run(self, call: ToolCall) -> ToolResult:
+    async def run(self, call: ToolCall) -> ToolResult:
         tool = self._tools.get(call.name)
         if tool is None:
             return ToolResult(call.id, call.name, f"unknown tool: {call.name}", is_error=True)
         try:
             output = tool.fn(**call.arguments)
+            if inspect.isawaitable(output):
+                output = await output
         except Exception as exc:  # the model reads the error and can try again
             return ToolResult(call.id, call.name, f"{type(exc).__name__}: {exc}", is_error=True)
         if len(output) > MAX_OUTPUT_CHARS:

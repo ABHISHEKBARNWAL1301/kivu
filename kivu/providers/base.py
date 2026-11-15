@@ -3,6 +3,9 @@
 Still to build:
 - map vendor errors to a small set kivu understands (auth, rate limit, server, bad request)
 - optional: streaming
+
+complete() is async: the network call is the slow part, and it lets the loop
+await it alongside other work (tool calls, a stream) later.
 """
 
 from __future__ import annotations
@@ -17,4 +20,4 @@ class Provider(Protocol):
     name: str
     model: str
 
-    def complete(self, system: str, messages: list[Message], tools: list[Tool]) -> Response: ...
+    async def complete(self, system: str, messages: list[Message], tools: list[Tool]) -> Response: ...

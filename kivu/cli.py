@@ -7,6 +7,8 @@ Still to build:
 from __future__ import annotations
 
 import argparse
+import asyncio
+import atexit
 import sys
 from pathlib import Path
 
@@ -44,9 +46,9 @@ class Spinner:
         self.name = inner.name
         self.model = inner.model
 
-    def complete(self, system: str, messages: list[Message], tools: list[Tool]) -> Response:
+    async def complete(self, system: str, messages: list[Message], tools: list[Tool]) -> Response:
         with self.ui.thinking():
-            return self.inner.complete(system, messages, tools)
+            return await self.inner.complete(system, messages, tools)
 
 
 def setup(ui: UI) -> None:
@@ -92,12 +94,16 @@ def main() -> None:
     approver = Approver(ui, auto=args.yes)
     registry = Registry(file_tools(root, approver) + shell_tools(root, approver) + task_tools(ui))
     history: list[Message] = []
+    # One event loop for the whole session: each turn runs on it, and async clients
+    # (the Gemini SDK's) stay bound to the same loop between turns.
+    runner = asyncio.Runner()
+    atexit.register(runner.close)
 
     def ask(text: str) -> bool:
         start = len(history)
         history.append(user(text))
         try:
-            reply = loop.run(provider, registry, SYSTEM, history, cfg.max_steps, on_tool=ui.tool)
+            reply = runner.run(loop.run(provider, registry, SYSTEM, history, cfg.max_steps, on_tool=ui.tool))
         except KeyboardInterrupt:
             del history[start:]  # drop the half-finished turn so the next one starts clean
             ui.error("cancelled")

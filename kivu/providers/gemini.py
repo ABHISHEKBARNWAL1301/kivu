@@ -2,6 +2,7 @@
 
 The SDK only makes the HTTP call. Kivu owns the history and the loop, so this
 uses generate_content (not chats) and turns automatic function calling off.
+Calls go through the SDK's async client (client.aio).
 """
 
 from __future__ import annotations
@@ -25,13 +26,13 @@ class GeminiProvider:
         self.model = model
         self.client = genai.Client(api_key=api_key)
 
-    def complete(self, system: str, messages: list[Message], tools: list[Tool]) -> Response:
+    async def complete(self, system: str, messages: list[Message], tools: list[Tool]) -> Response:
         config = types.GenerateContentConfig(
             system_instruction=system,
             tools=[types.Tool(function_declarations=[_declaration(t) for t in tools])] if tools else None,
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
-        resp = self.client.models.generate_content(
+        resp = await self.client.aio.models.generate_content(
             model=self.model,
             contents=[_to_content(m) for m in messages],
             config=config,

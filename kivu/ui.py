@@ -9,7 +9,9 @@ Still to build:
 
 from __future__ import annotations
 
+import signal
 import sys
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -82,7 +84,7 @@ class UI:
             lexer = "diff" if detail.startswith("---") else "bash"
             self.out.print(Padding(Syntax(detail, lexer, theme="monokai", background_color="default"), (0, 0, 0, 2)))
         while True:
-            answer = self.out.input("  allow? [bold]y[/]es / [bold]n[/]o / [bold]a[/]lways this session: ")
+            answer = self._input("  allow? [bold]y[/]es / [bold]n[/]o / [bold]a[/]lways this session: ")
             if (answer := answer.strip().lower()[:1]) in ("y", "n", "a"):
                 return answer
 
@@ -95,7 +97,22 @@ class UI:
         if not sys.stdin.isatty():
             return None
         self.out.print(Text(f"? {question}", style="bold yellow"))
-        return self.out.input("  [bold green]>[/] ").strip()
+        return self._input("  [bold green]>[/] ").strip()
+
+    def _input(self, prompt: str) -> str:
+        """Read a line in the middle of an agent run, where ctrl-c must still work.
+
+        While a run is going, asyncio turns ctrl-c into "cancel the task", which
+        can't interrupt a blocking input(). Put Python's own handler back while we
+        wait, so ctrl-c raises KeyboardInterrupt here and ends the run.
+        """
+        if threading.current_thread() is not threading.main_thread():
+            return self.out.input(prompt)
+        old = signal.signal(signal.SIGINT, signal.default_int_handler)
+        try:
+            return self.out.input(prompt)
+        finally:
+            signal.signal(signal.SIGINT, old)
 
     def error(self, text: str) -> None:
         self.err.print(Text(f"error: {text}", style="red"))

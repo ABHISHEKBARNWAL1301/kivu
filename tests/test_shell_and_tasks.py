@@ -1,3 +1,5 @@
+import asyncio
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -35,23 +37,32 @@ class ShellTest(unittest.TestCase):
             (Path(tmp) / "f.txt").write_text("")
             answers = Answers()
             reg = Registry(shell_tools(Path(tmp), Approver(answers)))
-            self.assertEqual(reg.run(ToolCall("1", "run_shell", {"command": "ls"})).output, "exit code 0\nf.txt")
+            self.assertEqual(asyncio.run(reg.run(ToolCall("1", "run_shell", {"command": "ls"}))).output, "exit code 0\nf.txt")
             self.assertEqual(answers.asked, [])
 
     def test_other_commands_need_approval(self) -> None:
         with TemporaryDirectory() as tmp:
             reg = Registry(shell_tools(Path(tmp), Approver(Answers("n", "y"))))
-            declined = reg.run(ToolCall("1", "run_shell", {"command": "echo hi"}))
+            declined = asyncio.run(reg.run(ToolCall("1", "run_shell", {"command": "echo hi"})))
             self.assertTrue(declined.is_error)
-            allowed = reg.run(ToolCall("2", "run_shell", {"command": "echo hi; exit 3"}))
+            allowed = asyncio.run(reg.run(ToolCall("2", "run_shell", {"command": "echo hi; exit 3"})))
             self.assertEqual(allowed.output, "exit code 3\nhi")
 
     def test_timeout(self) -> None:
         with TemporaryDirectory() as tmp:
             reg = Registry(shell_tools(Path(tmp), Approver(auto=True)))
-            result = reg.run(ToolCall("1", "run_shell", {"command": "sleep 5", "timeout_seconds": 1}))
+            result = asyncio.run(reg.run(ToolCall("1", "run_shell", {"command": "sleep 5", "timeout_seconds": 1})))
             self.assertTrue(result.is_error)
             self.assertIn("timed out", result.output)
+
+    def test_timeout_stops_child_processes_too(self) -> None:
+        with TemporaryDirectory() as tmp:
+            reg = Registry(shell_tools(Path(tmp), Approver(auto=True)))
+            start = time.monotonic()
+            # the background sleep keeps the output pipe open unless it's killed as well
+            result = asyncio.run(reg.run(ToolCall("1", "run_shell", {"command": "sleep 30 & wait", "timeout_seconds": 1})))
+            self.assertTrue(result.is_error)
+            self.assertLess(time.monotonic() - start, 10)
 
 
 class FakeTaskUI:
@@ -71,14 +82,14 @@ class TaskToolsTest(unittest.TestCase):
         ui = FakeTaskUI(None)
         reg = Registry(task_tools(ui))
         items = [{"step": "read code", "status": "done"}, {"step": "fix bug", "status": "in_progress"}]
-        self.assertEqual(reg.run(ToolCall("1", "update_plan", {"items": items})).output, "plan updated")
+        self.assertEqual(asyncio.run(reg.run(ToolCall("1", "update_plan", {"items": items}))).output, "plan updated")
         self.assertEqual(ui.plans, [items])
-        bad = reg.run(ToolCall("2", "update_plan", {"items": [{"step": "x", "status": "maybe"}]}))
+        bad = asyncio.run(reg.run(ToolCall("2", "update_plan", {"items": [{"step": "x", "status": "maybe"}]})))
         self.assertTrue(bad.is_error)
 
     def test_ask_user(self) -> None:
-        self.assertEqual(Registry(task_tools(FakeTaskUI("blue"))).run(ToolCall("1", "ask_user", {"question": "?"})).output, "blue")
-        away = Registry(task_tools(FakeTaskUI(None))).run(ToolCall("1", "ask_user", {"question": "?"}))
+        self.assertEqual(asyncio.run(Registry(task_tools(FakeTaskUI("blue"))).run(ToolCall("1", "ask_user", {"question": "?"}))).output, "blue")
+        away = asyncio.run(Registry(task_tools(FakeTaskUI(None))).run(ToolCall("1", "ask_user", {"question": "?"})))
         self.assertIn("isn't available", away.output)
 
 
