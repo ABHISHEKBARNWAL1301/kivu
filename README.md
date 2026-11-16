@@ -15,6 +15,7 @@ kivu/
   agent/loop.py       the agent loop with limits
   agent/context.py    what goes into each model call
   tools/              registry plus file and shell tools
+  mcp_client.py       connects to MCP servers and adds their tools
   sandbox/            path and command policy, user approval
   session.py          save and resume conversations
   tracing.py          one trace per run
@@ -56,6 +57,29 @@ kivu
 ```
 
 Your choice is saved to `~/.config/kivu/config.json`. Run `kivu setup` again to switch, or override once with `kivu -m <model>`. Run one prompt and exit with `kivu -p "..."`.
+
+## MCP servers
+
+Kivu can use tools from MCP servers. List them in `~/.config/kivu/mcp.json`, in the same shape as Claude Code's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "lav-data": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/lav-data-mcp", "lav-data-mcp"],
+      "env": {"LAV_DATA_ENV_FILES": "/path/to/local.env"},
+      "allow": ["list_sources"]
+    }
+  }
+}
+```
+
+- Tools show up as `mcp__<server>__<tool>`. Each call asks for approval, except the tools named in `allow` (`["*"]` for all).
+- A `.mcp.json` in the workspace root works too. Those servers start without asking, but their `allow` is ignored.
+- Other keys: `"disabled": true`, `"timeout": 120` (seconds per call). `$VARS` in `command`, `args` and `env` are filled in from your shell.
+- Only stdio servers for now. A server's stderr goes to `~/.cache/kivu/mcp/<server>.log`.
+- `kivu --no-mcp` starts without them.
 
 ## Tests
 

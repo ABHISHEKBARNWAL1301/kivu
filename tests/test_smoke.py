@@ -6,6 +6,7 @@ MODULES = [
     "kivu.cli",
     "kivu.config",
     "kivu.messages",
+    "kivu.mcp_client",
     "kivu.ui",
     "kivu.tracing",
     "kivu.session",

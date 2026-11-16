@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import __version__, config, providers
 from .agent import loop
+from .mcp_client import McpManager, load_specs
 from .messages import Message, Response, user
 from .providers.base import Provider
 from .sandbox.approval import Approver
@@ -67,6 +68,30 @@ def setup(ui: UI) -> None:
     ui.info("Saved. Run `kivu setup` any time to switch.\n")
 
 
+def connect_mcp(runner: asyncio.Runner, root: Path, approver: Approver, registry: Registry, ui: UI) -> str:
+    """Start the MCP servers, add their tools, and return their notes for the system prompt."""
+    specs, problems = load_specs(root)
+    for problem in problems:
+        ui.error(f"mcp: {problem}")
+    if not specs:
+        return ""
+    manager = McpManager(root, approver)
+    # atexit runs last-registered first, so the servers stop before the runner closes
+    atexit.register(lambda: runner.run(manager.close()))
+    try:
+        runner.run(manager.start(specs))
+    except KeyboardInterrupt:
+        ui.error("mcp: startup cancelled, going on without MCP servers")
+        return ""
+    for tool in manager.tools:
+        registry.add(tool)
+    for name, why in manager.failed.items():
+        ui.error(f"mcp {name}: {why}")
+    if manager.connected:
+        ui.info("mcp: " + ", ".join(f"{name} ({count} tools)" for name, count in manager.connected.items()))
+    return manager.system_notes()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="kivu")
     parser.add_argument("command", nargs="?", choices=["setup"], help="setup: pick provider, model and key")
@@ -75,6 +100,7 @@ def main() -> None:
     parser.add_argument("--provider")
     parser.add_argument("-m", "--model")
     parser.add_argument("-y", "--yes", action="store_true", help="approve every write and command without asking")
+    parser.add_argument("--no-mcp", action="store_true", help="don't start the MCP servers in mcp.json")
     parser.add_argument("--version", action="version", version=f"kivu {__version__}")
     args = parser.parse_args()
 
@@ -93,17 +119,20 @@ def main() -> None:
     root = Path(args.cwd)
     approver = Approver(ui, auto=args.yes)
     registry = Registry(file_tools(root, approver) + shell_tools(root, approver) + task_tools(ui))
-    history: list[Message] = []
     # One event loop for the whole session: each turn runs on it, and async clients
-    # (the Gemini SDK's) stay bound to the same loop between turns.
+    # (the Gemini SDK's, the MCP sessions) stay bound to the same loop between turns.
     runner = asyncio.Runner()
     atexit.register(runner.close)
+    system = SYSTEM
+    if not args.no_mcp:
+        system += connect_mcp(runner, root, approver, registry, ui)
+    history: list[Message] = []
 
     def ask(text: str) -> bool:
         start = len(history)
         history.append(user(text))
         try:
-            reply = runner.run(loop.run(provider, registry, SYSTEM, history, cfg.max_steps, on_tool=ui.tool))
+            reply = runner.run(loop.run(provider, registry, system, history, cfg.max_steps, on_tool=ui.tool))
         except KeyboardInterrupt:
             del history[start:]  # drop the half-finished turn so the next one starts clean
             ui.error("cancelled")
