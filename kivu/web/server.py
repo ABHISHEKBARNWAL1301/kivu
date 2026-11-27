@@ -1,8 +1,8 @@
-"""A small local web server for the kivu browser UI. Standard library only.
+"""A small local web server for the kivu browser UI (standard library + kivu.db).
 
 - Each chat (thread) has a folder it works in, a model, and a project label
-  (the folder's name unless you rename it). Chats are saved as JSON in
-  ~/.config/kivu/threads/.
+  (the folder's name unless you rename it). Chats and the profile are kept in
+  Postgres (kivu/db.py; start it with `docker compose up -d`).
 - A turn runs on its own worker thread with its own event loop, so approvals
   and ask_user can block there until you answer in the browser.
 - The browser long-polls GET /api/threads/<id>?after=<version> to see updates.
@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, urlparse
 from .. import config, providers
 from ..agent import loop
 from ..cli import SYSTEM
+from ..db import Database
 from ..messages import Message, Text, ToolCall, ToolResult, user
 from ..sandbox.approval import Approver
 from ..tools.files import file_tools
@@ -38,7 +39,7 @@ from ..tools.shell import shell_tools
 from ..tools.tasks import task_tools
 
 STATIC = Path(__file__).parent / "static"
-THREADS_DIR = config.CONFIG_PATH.parent / "threads"
+LEGACY_THREADS_DIR = config.CONFIG_PATH.parent / "threads"  # where the first web UI saved chats
 TOOL_OUTPUT_CHARS = 4000  # how much tool output a chat keeps for display
 WAIT_SECONDS = 25  # long-poll timeout
 MAX_STEPS = config.Config.max_steps
@@ -49,16 +50,18 @@ WEB_SYSTEM = SYSTEM.replace("in the user's terminal", "for the user") + "\n- For
 class Chat:
     """One conversation: what the browser shows (data) plus what the model sees (history)."""
 
-    def __init__(self, data: dict) -> None:
+    def __init__(self, data: dict, db: Database) -> None:
         self.data = data
+        self.db = db
         self.history: list[Message] = []
-        for item in data["items"]:  # after a restart, the model gets the text back (not tool calls)
+        for seq, item in enumerate(data["items"]):  # after a restart, the model gets the text back (not tool calls)
             if item["type"] == "user":
                 self.history.append(user(item["text"]))
             elif item["type"] == "assistant":
                 self.history.append(Message("assistant", [Text(item["text"])]))
             elif item.get("answer", "") is None:  # a prompt left open when the server stopped
                 item["answer"] = "n" if item["type"] == "approval" else ""
+                db.put_item(self.id, seq, item)
         self.approver = Approver(self, auto=data.get("mode") == "auto")
         self.cond = threading.Condition()
         self.version = 0
@@ -79,21 +82,15 @@ class Chat:
             self.data["updated"] = time.time()
             self.cond.notify_all()
         if save:
-            self.save()
+            self.db.update_thread(self.data)
 
     def add(self, item: dict) -> dict:
         with self.cond:
             self.data["items"].append(item)
+            seq = len(self.data["items"]) - 1
+        self.db.put_item(self.id, seq, item)
         self.changed()
         return item
-
-    def save(self) -> None:
-        THREADS_DIR.mkdir(parents=True, exist_ok=True)
-        path = THREADS_DIR / f"{self.id}.json"
-        tmp = path.with_suffix(".tmp")
-        with self.cond:
-            tmp.write_text(json.dumps(self.data, indent=1))
-        tmp.replace(path)
 
     def summary(self) -> dict:
         d = self.data
@@ -131,9 +128,10 @@ class Chat:
         self.add({"type": "plan", "items": items})
 
     def answer(self, prompt_id: str, answer: str) -> bool:
-        for item in self.data["items"]:
+        for seq, item in enumerate(self.data["items"]):
             if item.get("id") == prompt_id and item.get("answer") is None:
                 item["answer"] = answer
+                self.db.put_item(self.id, seq, item)
                 self.changed()
                 if prompt_id in self.waiting:
                     self.waiting[prompt_id].set()
@@ -195,15 +193,24 @@ class Chat:
 
 
 class Store:
-    def __init__(self) -> None:
-        self.chats: dict[str, Chat] = {}
+    def __init__(self, db: Database) -> None:
+        self.db = db
         self.lock = threading.Lock()
-        for path in THREADS_DIR.glob("*.json") if THREADS_DIR.exists() else []:
-            try:
-                chat = Chat(json.loads(path.read_text()))
-                self.chats[chat.id] = chat
-            except (ValueError, KeyError) as exc:
-                print(f"skipping {path.name}: {exc}")
+        self.profile = db.profile()
+        if imported := db.import_json(self.profile["id"], LEGACY_THREADS_DIR):
+            print(f"imported {imported} chats from {LEGACY_THREADS_DIR} (the files are left as they were)")
+        self.chats: dict[str, Chat] = {}
+        for data in db.threads(self.profile["id"]):
+            self.chats[data["id"]] = Chat(data, db)
+
+    def update_profile(self, fields: dict) -> dict:
+        fields = {k: v.strip() if isinstance(v, str) else v for k, v in fields.items()}
+        if fields.get("default_provider") and fields["default_provider"] not in config.PROVIDERS:
+            raise ValueError(f"unknown provider: {fields['default_provider']}")
+        if "theme" in fields and fields["theme"] not in ("system", "dark", "light"):
+            raise ValueError("theme must be system, dark or light")
+        self.profile = self.db.update_profile(self.profile["id"], fields)
+        return self.profile
 
     def create(self, folder: str, provider: str, model: str) -> Chat:
         path = Path(folder).expanduser().resolve()
@@ -222,18 +229,19 @@ class Store:
                 "created": now,
                 "updated": now,
                 "items": [],
-            }
+            },
+            self.db,
         )
+        self.db.insert_thread(self.profile["id"], chat.data)
         with self.lock:
             self.chats[chat.id] = chat
-        chat.save()
         return chat
 
     def delete(self, chat_id: str) -> None:
         with self.lock:
             chat = self.chats.pop(chat_id)
         chat.stop()
-        (THREADS_DIR / f"{chat_id}.json").unlink(missing_ok=True)
+        self.db.delete_thread(chat_id)
 
     def state(self) -> dict:
         chats = sorted(self.chats.values(), key=lambda c: c.data["updated"], reverse=True)
@@ -242,19 +250,34 @@ class Store:
             if chat.data["folder"] not in folders:
                 folders.append(chat.data["folder"])
         saved = config.read_file()
+        provider = self.profile["default_provider"] or saved.get("provider", "gemini")
+        model = self.profile["default_model"] or saved.get("model") or config.PROVIDERS[provider]["models"][0]
         return {
+            "profile": self.profile,
             "threads": [c.summary() for c in chats],
             "folders": folders[:8],
             "home": str(Path.home()),
             "models": [
-                {"provider": name, "models": info["models"], "ready": bool(config.api_key(name)) and name in IMPLEMENTED}
+                {
+                    "provider": name,
+                    "models": info["models"],
+                    "ready": bool(config.api_key(name)) and name in IMPLEMENTED,
+                    "supported": name in IMPLEMENTED,
+                    "key": _mask(config.api_key(name)),
+                    "key_url": info["key_url"],
+                }
                 for name, info in config.PROVIDERS.items()
             ],
-            "default": {"provider": saved.get("provider", "gemini"), "model": saved.get("model", config.PROVIDERS["gemini"]["models"][0])},
+            "default": {"provider": provider, "model": model},
         }
 
 
 IMPLEMENTED = {"gemini"}  # providers.create() knows these
+
+
+def _mask(key: str | None) -> str | None:
+    """Enough of a key to recognise it; the full key never goes to the browser."""
+    return None if not key else ("•" * 6 + key[-4:] if len(key) > 8 else "•" * 6)
 
 
 def list_dirs(path: str | None) -> dict:
@@ -358,7 +381,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PATCH(self) -> None:
         parts = urlparse(self.path).path.strip("/").split("/")
-        if not self.local_only() or len(parts) != 3 or not (chat := self.chat(parts[2])):
+        if not self.local_only():
+            return
+        if parts == ["api", "profile"]:
+            try:
+                return self.send_json(self.store.update_profile(self.body()))
+            except ValueError as exc:
+                return self.send_json({"error": str(exc)}, 400)
+        if len(parts) == 3 and parts[:2] == ["api", "keys"]:  # {"key": "..."}; empty removes it
+            if parts[2] not in config.PROVIDERS:
+                return self.send_json({"error": f"unknown provider: {parts[2]}"}, 400)
+            key = str(self.body().get("key") or "").strip()
+            config.save_key(parts[2], key or None)
+            return self.send_json({"provider": parts[2], "key": _mask(config.api_key(parts[2]))})
+        if len(parts) != 3 or parts[:2] != ["api", "threads"]:
+            return self.send_json({"error": "not found"}, 404)
+        if not (chat := self.chat(parts[2])):
             return
         data = self.body()
         for key in ("title", "project", "provider", "model"):
@@ -403,7 +441,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-open", action="store_true", help="don't open the browser")
     args = parser.parse_args()
-    Handler.store = Store()
+    Handler.store = Store(Database())
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.daemon_threads = True
     url = f"http://127.0.0.1:{args.port}/"

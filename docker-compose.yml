@@ -1,0 +1,23 @@
+# Local Postgres for kivu: profile and chat history.
+# Start it with `docker compose up -d`. Listens on 5433 so it doesn't clash with another Postgres on 5432.
+services:
+  postgres:
+    image: postgres:17
+    container_name: kivu_postgres
+    environment:
+      POSTGRES_USER: kivu
+      POSTGRES_PASSWORD: kivu
+      POSTGRES_DB: kivu
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - kivu_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kivu -d kivu"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+
+volumes:
+  kivu_pg:

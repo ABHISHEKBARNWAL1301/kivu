@@ -1,5 +1,6 @@
 <!doctype html>
 <html lang="en">
+<script>document.documentElement.dataset.theme = localStorage.getItem("kivu.theme") || "system";</script>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -19,6 +20,10 @@
       <button data-group="recent">Recent</button>
     </div>
     <nav id="threads"></nav>
+    <button id="profile-btn" class="profile-btn" title="Your profile">
+      <span class="avatar" id="avatar">?</span>
+      <span class="who"><span id="profile-name">Set up profile</span><span class="sub" id="profile-sub"></span></span>
+    </button>
   </aside>
 
   <main id="main">
@@ -78,6 +83,41 @@
         <button type="button" id="pick" class="primary">Use this folder</button>
       </div>
     </form>
+  </dialog>
+
+  <!-- settings (opened from the profile button) -->
+  <dialog id="settings">
+    <div class="dlg settings">
+      <div class="dlg-head">
+        <h2>Settings</h2>
+        <button type="button" class="icon close" id="settings-close" title="Close">✕</button>
+      </div>
+
+      <section>
+        <h3>Profile</h3>
+        <form id="profile-form" class="grid">
+          <label class="field">Name<input name="name" placeholder="Your name"></label>
+          <label class="field">Email<input name="email" type="email" placeholder="you@example.com"></label>
+          <label class="field wide">Default model for new chats<select name="default" id="profile-model"></select></label>
+          <div class="wide row-end"><span class="saved" id="profile-saved" hidden>Saved</span><button class="primary">Save profile</button></div>
+        </form>
+      </section>
+
+      <section>
+        <h3>Theme</h3>
+        <div class="seg" id="theme-seg">
+          <button type="button" data-theme="system">System</button>
+          <button type="button" data-theme="dark">Dark</button>
+          <button type="button" data-theme="light">Light</button>
+        </div>
+      </section>
+
+      <section>
+        <h3>API keys</h3>
+        <p class="hint">Saved to <code>keys.json</code> on this machine (the CLI uses it too). Only the last 4 characters are shown here.</p>
+        <div id="keys"></div>
+      </section>
+    </div>
   </dialog>
 
   <!-- thread menu -->

@@ -30,6 +30,7 @@ async function loadState() {
   state = await api("GET", "/api/state");
   renderModels();
   renderSidebar();
+  renderProfile();
 }
 
 function renderSidebar() {
@@ -125,6 +126,92 @@ document.addEventListener("click", (e) => {
   if (!e.target.closest("#menu") && !e.target.closest(".more")) $("#menu").hidden = true;
 });
 
+// ---------- profile + settings ----------
+
+function renderProfile() {
+  const p = state.profile;
+  $("#avatar").textContent = (p.name || "?").trim().charAt(0).toUpperCase() || "?";
+  $("#profile-name").textContent = p.name || "Set up profile";
+  $("#profile-sub").textContent = p.email || state.default.model;
+  applyTheme(p.theme || "system");
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem("kivu.theme", theme); // read before first paint, so no flash
+  document.querySelectorAll("#theme-seg button").forEach((b) => b.classList.toggle("on", b.dataset.theme === theme));
+}
+
+$("#profile-btn").onclick = () => {
+  const f = $("#profile-form");
+  f.name.value = state.profile.name;
+  f.email.value = state.profile.email;
+  fillModelSelect($("#profile-model"));
+  $("#profile-model").value = `${state.default.provider}/${state.default.model}`;
+  $("#profile-saved").hidden = true;
+  renderKeys();
+  $("#settings").showModal();
+};
+$("#settings-close").onclick = () => $("#settings").close();
+$("#settings").addEventListener("close", () => draft && newChat(draft.folder)); // pick up a new default model
+
+$("#profile-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const [default_provider, ...rest] = f.default.value.split("/");
+  try {
+    state.profile = await api("PATCH", "/api/profile", { name: f.name.value, email: f.email.value, default_provider, default_model: rest.join("/") });
+    await loadState();
+    $("#profile-saved").hidden = false;
+  } catch (err) {
+    alert(err.message);
+  }
+};
+
+document.querySelectorAll("#theme-seg button").forEach((b) => {
+  b.onclick = async () => {
+    applyTheme(b.dataset.theme);
+    try {
+      state.profile = await api("PATCH", "/api/profile", { theme: b.dataset.theme });
+    } catch (err) {
+      alert(err.message);
+    }
+  };
+});
+
+function renderKeys() {
+  const box = $("#keys");
+  box.innerHTML = "";
+  for (const p of state.models) {
+    const row = el("div", "key");
+    const status = p.key ? `<span class="st ok">${md.esc(p.key)}</span>` : `<span class="st off">${p.supported ? "Not set" : "Not set · provider not supported yet"}</span>`;
+    row.innerHTML = `<span class="p"></span>${status}<a target="_blank" rel="noopener">Get a key ↗</a>
+      <form><input type="password" placeholder="Paste a new ${md.esc(p.provider)} key" autocomplete="off" spellcheck="false">
+      <button class="primary">Save</button>${p.key ? '<button type="button" class="ghost rm">Remove</button>' : ""}</form>`;
+    row.querySelector(".p").textContent = p.provider;
+    row.querySelector("a").href = p.key_url;
+    const form = row.querySelector("form");
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const key = form.querySelector("input").value.trim();
+      if (key) saveKey(p.provider, key);
+    };
+    const rm = row.querySelector(".rm");
+    if (rm) rm.onclick = () => confirm(`Remove the ${p.provider} key from keys.json?`) && saveKey(p.provider, "");
+    box.append(row);
+  }
+}
+
+async function saveKey(provider, key) {
+  try {
+    await api("PATCH", `/api/keys/${provider}`, { key });
+    await loadState();
+    renderKeys();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
 // ---------- open / new ----------
 
 function newChat(folder) {
@@ -134,8 +221,8 @@ function newChat(folder) {
   const last = state.threads[0];
   draft = {
     folder: folder || (last && last.folder) || null,
-    provider: (last && last.provider) || state.default.provider,
-    model: (last && last.model) || state.default.model,
+    provider: state.default.provider, // the profile's default model
+    model: state.default.model,
     mode: "ask",
   };
   history.replaceState(null, "", "#");
@@ -339,6 +426,11 @@ async function answerPrompt(id, answer) {
 function renderModels() {
   const sel = $("#model");
   const value = sel.value;
+  fillModelSelect(sel);
+  if (value) sel.value = value;
+}
+
+function fillModelSelect(sel) {
   sel.innerHTML = "";
   for (const p of state.models) {
     const og = document.createElement("optgroup");
@@ -350,7 +442,6 @@ function renderModels() {
     }
     sel.append(og);
   }
-  if (value) sel.value = value;
 }
 
 function renderComposer() {

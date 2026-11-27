@@ -60,6 +60,18 @@ def api_key(provider: str) -> str | None:
     return os.getenv(f"{provider.upper()}_API_KEY") or _read(KEYS_PATH).get(provider) or None
 
 
+def save_key(provider: str, key: str | None) -> None:
+    """Set or (with None/"") remove a provider's key in keys.json. Only you can read the file."""
+    keys = _read(KEYS_PATH)
+    if key:
+        keys[provider] = key
+    else:
+        keys.pop(provider, None)
+    KEYS_PATH.touch(mode=0o600, exist_ok=True)
+    KEYS_PATH.write_text(json.dumps(keys, indent=2) + "\n")
+    KEYS_PATH.chmod(0o600)
+
+
 def save(provider: str, model: str) -> None:
     data = read_file()
     data["provider"] = provider
