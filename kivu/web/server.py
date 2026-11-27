@@ -1,8 +1,9 @@
-"""A small local web server for the kivu browser UI (standard library + kivu.db).
+"""A small local web server for the kivu browser UI (standard library HTTP + kivu.db).
 
 - Each chat (thread) has a folder it works in, a model, and a project label
-  (the folder's name unless you rename it). Chats and the profile are kept in
-  Postgres (kivu/db.py; start it with `docker compose up -d`).
+  (the folder's name unless you rename it). Chats and the user's profile are
+  saved through kivu.db's use cases (Postgres; start it with `docker compose up -d`).
+- This module keeps the live side: running turns, waiting prompts, long-polls.
 - A turn runs on its own worker thread with its own event loop, so approvals
   and ask_user can block there until you answer in the browser.
 - The browser long-polls GET /api/threads/<id>?after=<version> to see updates.
@@ -27,10 +28,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from pydantic import ValidationError
+
 from .. import config, providers
 from ..agent import loop
 from ..cli import SYSTEM
-from ..db import Database
+from ..db import Conflict, DatabaseUnavailable, NotFound, ThreadUseCases, UserUseCases, init_db, make_engine, make_sessions
+from ..db.schemas import ThreadCreate, ThreadOut, ThreadUpdate, UserUpdate
 from ..messages import Message, Text, ToolCall, ToolResult, user
 from ..sandbox.approval import Approver
 from ..tools.files import file_tools
@@ -50,9 +54,9 @@ WEB_SYSTEM = SYSTEM.replace("in the user's terminal", "for the user") + "\n- For
 class Chat:
     """One conversation: what the browser shows (data) plus what the model sees (history)."""
 
-    def __init__(self, data: dict, db: Database) -> None:
+    def __init__(self, data: dict, threads: ThreadUseCases) -> None:
         self.data = data
-        self.db = db
+        self.threads = threads
         self.history: list[Message] = []
         for seq, item in enumerate(data["items"]):  # after a restart, the model gets the text back (not tool calls)
             if item["type"] == "user":
@@ -61,7 +65,7 @@ class Chat:
                 self.history.append(Message("assistant", [Text(item["text"])]))
             elif item.get("answer", "") is None:  # a prompt left open when the server stopped
                 item["answer"] = "n" if item["type"] == "approval" else ""
-                db.put_item(self.id, seq, item)
+                threads.update_item(self.id, seq, item)
         self.approver = Approver(self, auto=data.get("mode") == "auto")
         self.cond = threading.Condition()
         self.version = 0
@@ -76,19 +80,25 @@ class Chat:
 
     # -- state shared with the browser --
 
-    def changed(self, save: bool = True) -> None:
+    def changed(self) -> None:
+        """Wake the browsers long-polling this chat."""
         with self.cond:
             self.version += 1
-            self.data["updated"] = time.time()
             self.cond.notify_all()
-        if save:
-            self.db.update_thread(self.data)
+
+    def apply(self, out: ThreadOut) -> None:
+        """Take the saved fields from a use case's result (not items: this side keeps those)."""
+        with self.cond:
+            self.data.update({k: v for k, v in thread_data(out).items() if k != "items"})
+        self.approver.auto = self.data["mode"] == "auto"
+        self.changed()
 
     def add(self, item: dict) -> dict:
+        added = self.threads.add_item(self.id, item)  # saved first, so the seq here matches the database
         with self.cond:
             self.data["items"].append(item)
-            seq = len(self.data["items"]) - 1
-        self.db.put_item(self.id, seq, item)
+            self.data["title"] = added.title
+            self.data["updated"] = time.time()
         self.changed()
         return item
 
@@ -131,7 +141,7 @@ class Chat:
         for seq, item in enumerate(self.data["items"]):
             if item.get("id") == prompt_id and item.get("answer") is None:
                 item["answer"] = answer
-                self.db.put_item(self.id, seq, item)
+                self.threads.update_item(self.id, seq, item)
                 self.changed()
                 if prompt_id in self.waiting:
                     self.waiting[prompt_id].set()
@@ -142,12 +152,12 @@ class Chat:
 
     def send(self, text: str) -> None:
         if self.running:
-            raise ValueError("this chat is still working")
-        if not self.data["items"]:
-            self.data["title"] = text.strip().splitlines()[0][:60]
-        self.add({"type": "user", "text": text})
+            raise Conflict("this chat is still working")
+        if not text.strip():
+            raise ValueError("empty message")
+        self.add({"type": "user", "text": text})  # the first one also names the chat
         self.running = True
-        self.changed(save=False)
+        self.changed()
         threading.Thread(target=self._turn, args=(text,), daemon=True).start()
 
     def _turn(self, text: str) -> None:
@@ -192,56 +202,46 @@ class Chat:
             self.loop.call_soon_threadsafe(self.task.cancel)
 
 
+def thread_data(out: ThreadOut) -> dict:
+    """The shape the browser gets: use case output with epoch-second timestamps."""
+    data = out.model_dump(exclude={"created_at", "updated_at", "user_id"})
+    return data | {"created": out.created_at.timestamp(), "updated": out.updated_at.timestamp()}
+
+
 class Store:
-    def __init__(self, db: Database) -> None:
-        self.db = db
+    """Live chats in memory, saved through the use cases."""
+
+    def __init__(self, users: UserUseCases, threads: ThreadUseCases) -> None:
+        self.users = users
+        self.threads = threads
         self.lock = threading.Lock()
-        self.profile = db.profile()
-        if imported := db.import_json(self.profile["id"], LEGACY_THREADS_DIR):
+        self.profile = users.get_or_create_default().model_dump()
+        if imported := threads.import_legacy_json(self.profile["id"], LEGACY_THREADS_DIR):
             print(f"imported {imported} chats from {LEGACY_THREADS_DIR} (the files are left as they were)")
         self.chats: dict[str, Chat] = {}
-        for data in db.threads(self.profile["id"]):
-            self.chats[data["id"]] = Chat(data, db)
+        for out in threads.list_for_user(self.profile["id"]):
+            self.chats[out.id] = Chat(thread_data(out), threads)
 
-    def update_profile(self, fields: dict) -> dict:
-        fields = {k: v.strip() if isinstance(v, str) else v for k, v in fields.items()}
-        if fields.get("default_provider") and fields["default_provider"] not in config.PROVIDERS:
-            raise ValueError(f"unknown provider: {fields['default_provider']}")
-        if "theme" in fields and fields["theme"] not in ("system", "dark", "light"):
-            raise ValueError("theme must be system, dark or light")
-        self.profile = self.db.update_profile(self.profile["id"], fields)
+    def update_profile(self, body: dict) -> dict:
+        self.profile = self.users.update(self.profile["id"], UserUpdate.model_validate(body)).model_dump()
         return self.profile
 
-    def create(self, folder: str, provider: str, model: str) -> Chat:
-        path = Path(folder).expanduser().resolve()
-        if not path.is_dir():
-            raise ValueError(f"not a folder: {folder}")
-        now = time.time()
-        chat = Chat(
-            {
-                "id": uuid.uuid4().hex[:12],
-                "title": "New chat",
-                "folder": str(path),
-                "project": path.name or str(path),
-                "provider": provider,
-                "model": model,
-                "mode": "ask",
-                "created": now,
-                "updated": now,
-                "items": [],
-            },
-            self.db,
-        )
-        self.db.insert_thread(self.profile["id"], chat.data)
+    def create(self, body: dict) -> Chat:
+        out = self.threads.create(self.profile["id"], ThreadCreate.model_validate(body))
+        chat = Chat(thread_data(out), self.threads)
         with self.lock:
             self.chats[chat.id] = chat
         return chat
 
+    def update(self, chat: Chat, body: dict) -> Chat:
+        chat.apply(self.threads.update(chat.id, ThreadUpdate.model_validate(body)))
+        return chat
+
     def delete(self, chat_id: str) -> None:
+        self.threads.delete(chat_id)
         with self.lock:
             chat = self.chats.pop(chat_id)
         chat.stop()
-        self.db.delete_thread(chat_id)
 
     def state(self) -> dict:
         chats = sorted(self.chats.values(), key=lambda c: c.data["updated"], reverse=True)
@@ -323,6 +323,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "forbidden"}, 403)
         return ok_host and ok_origin
 
+    def fail(self, exc: Exception) -> None:
+        """Turn a use case or validation error into a JSON error the UI shows."""
+        if isinstance(exc, ValidationError):
+            msg = "; ".join(f"{'.'.join(map(str, e['loc'])) or 'body'}: {e['msg']}" for e in exc.errors())
+            return self.send_json({"error": msg}, 400)
+        status = 404 if isinstance(exc, NotFound) else 409 if isinstance(exc, Conflict) else 400
+        self.send_json({"error": str(exc)}, status)
+
     def chat(self, chat_id: str) -> Chat | None:
         chat = self.store.chats.get(chat_id)
         if chat is None:
@@ -349,7 +357,7 @@ class Handler(BaseHTTPRequestHandler):
                     chat.wait(int(query["after"][0]))
                 return self.send_json(chat.full())
         except ValueError as exc:
-            return self.send_json({"error": str(exc)}, 400)
+            return self.fail(exc)
         if len(parts) != 3:
             self.send_json({"error": "not found"}, 404)
 
@@ -360,8 +368,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = self.body()
             if parts == ["api", "threads"]:
-                chat = self.store.create(data["folder"], data["provider"], data["model"])
-                return self.send_json(chat.full(), 201)
+                return self.send_json(self.store.create(data).full(), 201)
             if len(parts) == 4 and parts[1] == "threads" and (chat := self.chat(parts[2])):
                 action = parts[3]
                 if action == "messages":
@@ -375,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error": "not found"}, 404)
                 return self.send_json(chat.full())
         except (ValueError, KeyError) as exc:
-            return self.send_json({"error": str(exc)}, 400)
+            return self.fail(exc)
         if len(parts) != 4:
             self.send_json({"error": "not found"}, 404)
 
@@ -387,7 +394,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 return self.send_json(self.store.update_profile(self.body()))
             except ValueError as exc:
-                return self.send_json({"error": str(exc)}, 400)
+                return self.fail(exc)
         if len(parts) == 3 and parts[:2] == ["api", "keys"]:  # {"key": "..."}; empty removes it
             if parts[2] not in config.PROVIDERS:
                 return self.send_json({"error": f"unknown provider: {parts[2]}"}, 400)
@@ -398,27 +405,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "not found"}, 404)
         if not (chat := self.chat(parts[2])):
             return
-        data = self.body()
-        for key in ("title", "project", "provider", "model"):
-            if isinstance(data.get(key), str) and data[key].strip():
-                chat.data[key] = data[key].strip()
-        if data.get("mode") in ("ask", "auto"):
-            chat.data["mode"] = data["mode"]
-            chat.approver.auto = data["mode"] == "auto"
-        if "folder" in data:
-            if chat.data["items"]:
-                return self.send_json({"error": "a chat's folder can't change once it has messages"}, 409)
-            path = Path(data["folder"]).expanduser().resolve()
-            if not path.is_dir():
-                return self.send_json({"error": f"not a folder: {path}"}, 400)
-            chat.data["folder"], chat.data["project"] = str(path), path.name
-        chat.changed()
-        self.send_json(chat.full())
+        try:
+            self.send_json(self.store.update(chat, self.body()).full())
+        except ValueError as exc:
+            self.fail(exc)
 
     def do_DELETE(self) -> None:
         parts = urlparse(self.path).path.strip("/").split("/")
         if self.local_only() and len(parts) == 3 and self.chat(parts[2]):
-            self.store.delete(parts[2])
+            try:
+                self.store.delete(parts[2])
+            except ValueError as exc:
+                return self.fail(exc)
             self.send_json({"ok": True})
 
     def static(self, path: str) -> None:
@@ -441,7 +439,13 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-open", action="store_true", help="don't open the browser")
     args = parser.parse_args()
-    Handler.store = Store(Database())
+    try:
+        engine = make_engine()
+        init_db(engine)
+    except DatabaseUnavailable as exc:
+        raise SystemExit(str(exc)) from None
+    sessions = make_sessions(engine)
+    Handler.store = Store(UserUseCases(sessions), ThreadUseCases(sessions))
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.daemon_threads = True
     url = f"http://127.0.0.1:{args.port}/"

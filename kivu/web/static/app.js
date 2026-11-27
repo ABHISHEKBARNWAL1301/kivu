@@ -107,9 +107,6 @@ function showMenu(anchor, t) {
       if (act === "rename") {
         const title = prompt("Rename chat", t.title);
         if (title) await api("PATCH", `/api/threads/${t.id}`, { title });
-      } else if (act === "project") {
-        const project = prompt("Project for this chat (chats are grouped by it)", t.project);
-        if (project) await api("PATCH", `/api/threads/${t.id}`, { project });
       } else if (act === "delete") {
         if (!confirm(`Delete “${t.title}”? This can't be undone.`)) return;
         await api("DELETE", `/api/threads/${t.id}`);
