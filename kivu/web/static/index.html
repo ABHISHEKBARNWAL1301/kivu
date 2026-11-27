@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>kivu</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <div class="side-top">
+      <div class="brand">kivu</div>
+      <button id="new-chat" class="new-chat" title="New chat">
+        <svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg> New chat
+      </button>
+    </div>
+    <div class="side-tabs" role="tablist">
+      <button data-group="project" class="active">Projects</button>
+      <button data-group="recent">Recent</button>
+    </div>
+    <nav id="threads"></nav>
+  </aside>
+
+  <main id="main">
+    <header id="chat-head">
+      <div class="head-title" id="head-title">New chat</div>
+      <div class="head-folder" id="head-folder"></div>
+    </header>
+
+    <section id="messages">
+      <div class="empty" id="empty">
+        <div class="empty-mark">kivu</div>
+        <p>Pick a folder, then ask kivu to read, change or run code in it.</p>
+      </div>
+    </section>
+
+    <form id="composer" autocomplete="off">
+      <div class="box">
+        <textarea id="input" rows="1" placeholder="Ask kivu to build, fix or explain something…"></textarea>
+        <button type="submit" id="send" class="send" title="Send (Enter)">
+          <svg viewBox="0 0 16 16"><path d="M13 3v5a2 2 0 0 1-2 2H3m3-3-3 3 3 3"/></svg>
+        </button>
+        <button type="button" id="stop" class="send stop" title="Stop" hidden>
+          <svg viewBox="0 0 16 16"><rect x="4" y="4" width="8" height="8" rx="1"/></svg>
+        </button>
+      </div>
+      <div class="bar">
+        <div class="bar-left">
+          <button type="button" class="chip" id="folder-chip" title="Folder this chat works in">
+            <svg viewBox="0 0 16 16"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>
+            <span id="folder-label">Select folder</span>
+            <svg class="caret" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"/></svg>
+          </button>
+          <label class="chip check" title="Approve edits and commands without asking">
+            <input type="checkbox" id="auto"> Auto-approve
+          </label>
+        </div>
+        <div class="bar-right">
+          <select id="model" class="chip select" title="Model"></select>
+        </div>
+      </div>
+    </form>
+  </main>
+
+  <!-- folder picker -->
+  <dialog id="folder-dialog">
+    <form method="dialog" class="dlg">
+      <h2>Choose a folder</h2>
+      <div id="recent-folders"></div>
+      <div class="path-row">
+        <button type="button" id="up" class="icon" title="Up one folder">↑</button>
+        <input id="path" spellcheck="false">
+        <button type="button" id="go" class="icon" title="Open">→</button>
+      </div>
+      <ul id="dirs"></ul>
+      <div class="dlg-actions">
+        <button value="cancel" class="ghost">Cancel</button>
+        <button type="button" id="pick" class="primary">Use this folder</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- thread menu -->
+  <div id="menu" class="menu" hidden>
+    <button data-act="rename">Rename</button>
+    <button data-act="project">Move to project…</button>
+    <button data-act="delete" class="danger">Delete</button>
+  </div>
+
+  <script src="/markdown.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
